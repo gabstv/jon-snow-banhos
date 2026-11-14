@@ -4,6 +4,7 @@
 (() => {
   "use strict";
 
+  const APP_VERSION = "v3";
   const TZ = "America/Sao_Paulo";
   const LOCALE = "pt-BR";
   const STORAGE_KEY = "jonsnow.v1";
@@ -828,6 +829,13 @@
     }
     return "";
   }
+  function versionFooter() {
+    return `<p class="app-version">Versão ${esc(APP_VERSION)}</p>`;
+  }
+  function receiptButtonHTML(pkg) {
+    const label = pkg.receiptId ? "Comprovante de pagamento" : "Adicionar comprovante";
+    return `<button type="button" class="btn btn-receipt" data-action="go" data-hash="#/pacote/${esc(pkg.id)}">${ICO.receipt}<span>${label}</span></button>`;
+  }
   function receiptRowHTML(pkg) {
     const thumb = pkg.receiptId
       ? `<img class="receipt-thumb" alt="Comprovante de pagamento" data-photo="${esc(pkg.receiptId)}" data-action="view-receipt" data-id="${esc(pkg.id)}" />`
@@ -873,6 +881,7 @@
       pkgCard = `<section class="card">
         <h2>Pacote atual</h2>
         <p class="pkg-meta">${last ? "O último pacote já foi concluído." : "Nenhum pacote aberto ainda."}</p>
+        ${last ? receiptButtonHTML(last) + `<div style="height:0.55rem"></div>` : ""}
         <button class="btn btn-primary" data-action="go" data-hash="#/pacote/novo">Abrir novo pacote</button>
       </section>`;
     } else {
@@ -893,7 +902,7 @@
         </div>
         ${segmentsHTML(used, pkg.quantity)}
         ${packageAlerts(pkg)}
-        ${receiptRowHTML(pkg)}
+        ${receiptButtonHTML(pkg)}
       </section>`;
     }
     const list = recent.length
@@ -913,6 +922,7 @@
           <h2 class="section-title">Últimos banhos</h2>
           ${list}
         </section>
+        ${versionFooter()}
       </div>
       ${navHTML("inicio")}
     </div>`;
@@ -948,7 +958,7 @@
         <p class="pkg-meta">${used} de ${pkg.quantity} banhos · ${esc(validade)}</p>
         ${segmentsHTML(used, pkg.quantity)}
         ${packageAlerts(pkg)}
-        ${receiptRowHTML(pkg)}
+        ${receiptButtonHTML(pkg)}
       </section>`;
     }).join("") || `<div class="empty"><p>Nenhum pacote ainda.</p></div>`;
     return `<div class="page">
@@ -1124,6 +1134,7 @@
           <a href="#/como-usar"><span class="ico">${ICO.home}</span><span>Como usar</span>${ICO.chev}</a>
         </div>
         <p class="help">Os dados e as fotos ficam só neste aparelho e neste navegador. Faça um backup de vez em quando.</p>
+        ${versionFooter()}
       </div>
       ${navHTML("mais")}
     </div>`;
@@ -1726,9 +1737,28 @@
     render();
     if (intent) openConfirm(intent);
 
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("./sw.js").catch(() => { /* offline is best-effort */ });
-    }
+    setupServiceWorker();
+  }
+
+  function setupServiceWorker() {
+    if (!("serviceWorker" in navigator)) return;
+    let reloading = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (reloading) return;
+      reloading = true;
+      location.reload();
+    });
+    navigator.serviceWorker
+      .register("./sw.js", { updateViaCache: "none" })
+      .then((reg) => {
+        const check = () => { reg.update().catch(() => {}); };
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") check();
+        });
+        window.addEventListener("focus", check);
+        check();
+      })
+      .catch(() => { /* offline is best-effort */ });
   }
 
   if (document.readyState === "loading") {

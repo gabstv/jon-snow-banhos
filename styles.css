@@ -576,3 +576,19 @@ textarea { min-height: 6rem; resize: vertical; }
   border-radius: 14px;
   display: block;
 }
+
+.app-version {
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.06em;
+  margin: 0.4rem 0 0.2rem;
+}
+.btn-receipt {
+  background: var(--gold-soft);
+  color: #3d2f10;
+  border: 1px solid #e4d2a4;
+  margin-top: 0.85rem;
+}
+.btn-receipt svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.btn-receipt:active { background: #ead9b0; }

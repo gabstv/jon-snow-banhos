@@ -24,6 +24,8 @@ A origem (QR, NFC, atalho ou app) fica salva em cada banho e aparece no históri
 
 Por padrão, cada pacote tem 4 banhos e vale 2 meses a partir do **primeiro** banho. O app mostra quantos já foram usados, quantos restam, a data de validade e um aviso quando o prazo está perto de acabar ou já venceu.
 
+Em cada pacote dá para anexar um **comprovante de pagamento** (PNG ou JPEG), com valor e data opcionais. A imagem fica no aparelho, em qualidade alta o bastante para ler os dados. Dá para ver em tamanho real, baixar ou compartilhar. Isso entra no backup JSON e aparece na planilha CSV (colunas Comprovante, Valor pago e Data do pagamento).
+
 Na primeira abertura, o pacote atual é criado com o 1º banho em 14/11/2026 às 12:00 (horário de Brasília), com a observação “Primeiro banho do pacote”, como na planilha.
 
 ## Dados e backup

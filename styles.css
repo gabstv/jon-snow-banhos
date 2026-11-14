@@ -533,3 +533,46 @@ textarea { min-height: 6rem; resize: vertical; }
   letter-spacing: -0.02em;
 }
 .method-card .lead { margin: 0 0 0.85rem; }
+
+/* ---------- payment receipt ---------- */
+.receipt-row {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+  margin-top: 0.9rem;
+  padding: 0.55rem 0.15rem 0.1rem;
+  text-decoration: none;
+  color: inherit;
+  border-top: 1px solid var(--line);
+}
+.receipt-thumb {
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  object-fit: cover;
+  background: #e8eef0;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: var(--accent-2);
+  overflow: hidden;
+}
+.receipt-thumb.placeholder svg { width: 22px; height: 22px; opacity: 0.75; }
+.receipt-hero-btn {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: var(--radius);
+}
+.receipt-hero { cursor: zoom-in; }
+.lightbox-sheet { max-width: 28rem; width: 100%; }
+.receipt-full {
+  width: 100%;
+  max-height: min(70dvh, 32rem);
+  object-fit: contain;
+  background: #111a1c;
+  border-radius: 14px;
+  display: block;
+}

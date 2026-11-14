@@ -11,6 +11,9 @@
   const DB_VERSION = 1;
   const PHOTO_MAX = 1280;
   const PHOTO_QUALITY = 0.82;
+  const RECEIPT_MAX = 2000;
+  const RECEIPT_JPEG_QUALITY = 0.9;
+  const SMALL_PNG_BYTES = 1.5 * 1024 * 1024;
   const RECENT_HOURS = 12;
   const NEAR_EXPIRY_DAYS = 7;
   const DEFAULT_QTY = 4;
@@ -33,6 +36,7 @@
     chev: '<svg class="chev" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>',
     cam: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l1.5-2h7L17 8h3v11H4V8z"/><circle cx="12" cy="13" r="3.2"/></svg>',
     paw: '<svg viewBox="0 0 24 24" fill="currentColor"><ellipse cx="7" cy="8" rx="2.1" ry="2.4"/><ellipse cx="17" cy="8" rx="2.1" ry="2.4"/><ellipse cx="10" cy="5.2" rx="2.1" ry="2.4"/><ellipse cx="14" cy="5.2" rx="2.1" ry="2.4"/><path d="M8.2 12.2c0-1.6 1.6-2.6 3.8-2.6s3.8 1 3.8 2.6c0 2.3-1.8 4.6-3.8 4.6s-3.8-2.3-3.8-4.6z"/></svg>',
+    receipt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5h10a1.5 1.5 0 0 1 1.5 1.5v15l-2-1-2 1-2-1-2 1-2-1-1.5 1V5A1.5 1.5 0 0 1 7 3.5z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>',
   };
 
   function uid(prefix) {
@@ -155,6 +159,39 @@
       packages: state.packages,
       baths: state.baths,
     }));
+  }
+  function migrateState(st) {
+    if (!st || !Array.isArray(st.packages)) return st;
+    for (const pkg of st.packages) {
+      if (pkg.receiptId === undefined) pkg.receiptId = null;
+      if (pkg.paymentAmount === undefined) pkg.paymentAmount = null;
+      if (pkg.paymentDate === undefined) pkg.paymentDate = null;
+    }
+    return st;
+  }
+  function parseYmd(ymd) {
+    const m = String(ymd || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m) return null;
+    return dateFromZoned(+m[1], +m[2], +m[3], 12, 0, 0, 0);
+  }
+  function fmtMoney(n) {
+    if (n == null || n === "") return "";
+    return new Intl.NumberFormat(LOCALE, { style: "currency", currency: "BRL" }).format(Number(n));
+  }
+  function fmtMoneyPlain(n) {
+    if (n == null || n === "") return "";
+    return new Intl.NumberFormat(LOCALE, { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(n));
+  }
+  function parseMoney(s) {
+    const raw = String(s || "").trim();
+    if (!raw) return null;
+    const t = raw.replace(/R\$\s?/i, "").replace(/\s/g, "").replace(/\./g, "").replace(",", ".");
+    const n = Number(t);
+    if (!Number.isFinite(n) || n < 0) return null;
+    return Math.round(n * 100) / 100;
+  }
+  function moneyInputValue(n) {
+    return n == null || n === "" ? "" : fmtMoneyPlain(n);
   }
   function openDB() {
     if (dbPromise) return dbPromise;
@@ -305,6 +342,9 @@
       expiresAt: null,
       completedAt: null,
       notes: "",
+      receiptId: null,
+      paymentAmount: null,
+      paymentDate: null,
     };
     const bath = {
       id: uid("banho"),
@@ -370,6 +410,141 @@
     saveState();
   }
 
+  async function compressReceipt(file) {
+    const type = (file.type || "").toLowerCase();
+    const name = file.name || "";
+    const isPng = type === "image/png" || /\.png$/i.test(name);
+    const loadSize = async () => {
+      try {
+        const bitmap = await createImageBitmap(file);
+        const dim = { w: bitmap.width, h: bitmap.height, bitmap };
+        return dim;
+      } catch {
+        const url = URL.createObjectURL(file);
+        try {
+          const img = await new Promise((resolve, reject) => {
+            const el = new Image();
+            el.onload = () => resolve(el);
+            el.onerror = reject;
+            el.src = url;
+          });
+          return { w: img.naturalWidth, h: img.naturalHeight, img, url };
+        } catch (err) {
+          URL.revokeObjectURL(url);
+          throw err;
+        }
+      }
+    };
+    let src;
+    try {
+      src = await loadSize();
+    } catch {
+      throw new Error("Não foi possível ler a imagem. Use um arquivo PNG ou JPEG.");
+    }
+    const maxDim = Math.max(src.w, src.h) || 1;
+    const keepPngAsIs = isPng && file.size <= SMALL_PNG_BYTES && maxDim <= RECEIPT_MAX;
+    if (keepPngAsIs) {
+      if (src.bitmap && typeof src.bitmap.close === "function") src.bitmap.close();
+      if (src.url) URL.revokeObjectURL(src.url);
+      return file;
+    }
+    const scale = Math.min(1, RECEIPT_MAX / maxDim);
+    const w = Math.max(1, Math.round(src.w * scale));
+    const h = Math.max(1, Math.round(src.h * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    if (src.bitmap) {
+      ctx.drawImage(src.bitmap, 0, 0, w, h);
+      if (typeof src.bitmap.close === "function") src.bitmap.close();
+    } else {
+      ctx.drawImage(src.img, 0, 0, w, h);
+      URL.revokeObjectURL(src.url);
+    }
+    const toBlob = (mime, quality) => new Promise((resolve) => canvas.toBlob(resolve, mime, quality));
+    if (isPng) {
+      const pngBlob = await toBlob("image/png");
+      if (pngBlob && pngBlob.size <= 2.5 * 1024 * 1024) return pngBlob;
+    }
+    return (await toBlob("image/jpeg", RECEIPT_JPEG_QUALITY)) || file;
+  }
+  async function attachReceiptToPackage(packageId, file) {
+    const pkg = packageById(packageId);
+    if (!pkg || !file) return;
+    const blob = await compressReceipt(file);
+    const receiptId = pkg.receiptId || uid("comp");
+    await putPhoto(receiptId, blob);
+    if (photoUrls.has(receiptId)) {
+      URL.revokeObjectURL(photoUrls.get(receiptId));
+      photoUrls.delete(receiptId);
+    }
+    pkg.receiptId = receiptId;
+    saveState();
+  }
+  async function removeReceiptFromPackage(packageId) {
+    const pkg = packageById(packageId);
+    if (!pkg || !pkg.receiptId) return;
+    const id = pkg.receiptId;
+    pkg.receiptId = null;
+    saveState();
+    try { await deletePhotoRecord(id); } catch { /* ignore */ }
+  }
+  function updatePackagePayment(packageId, { paymentAmount, paymentDate }) {
+    const pkg = packageById(packageId);
+    if (!pkg) return;
+    if (paymentAmount !== undefined) pkg.paymentAmount = paymentAmount;
+    if (paymentDate !== undefined) pkg.paymentDate = paymentDate || null;
+    saveState();
+  }
+  function receiptFileName(pkg, blob) {
+    const ext = ((blob && blob.type) || "").includes("png") ? "png" : "jpg";
+    const slug = String(pkg.name || "pacote").toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "pacote";
+    return `comprovante-${slug}.${ext}`;
+  }
+  async function downloadReceipt(packageId) {
+    const pkg = packageById(packageId);
+    if (!pkg || !pkg.receiptId) return;
+    const blob = await getPhoto(pkg.receiptId);
+    if (!blob) { toast("Comprovante não encontrado"); return; }
+    downloadBlob(blob, receiptFileName(pkg, blob));
+    toast("Comprovante baixado");
+  }
+  async function shareReceipt(packageId) {
+    const pkg = packageById(packageId);
+    if (!pkg || !pkg.receiptId) return;
+    const blob = await getPhoto(pkg.receiptId);
+    if (!blob) { toast("Comprovante não encontrado"); return; }
+    const name = receiptFileName(pkg, blob);
+    const file = new File([blob], name, { type: blob.type || "image/jpeg" });
+    const bits = [pkg.name];
+    if (pkg.paymentAmount != null) bits.push(fmtMoney(pkg.paymentAmount));
+    if (pkg.paymentDate) {
+      const d = parseYmd(pkg.paymentDate);
+      if (d) bits.push(fmtDate(d));
+    }
+    const text = bits.join(" · ");
+    if (navigator.share) {
+      try {
+        const payload = { title: `Comprovante — ${pkg.name}`, text, files: [file] };
+        if (!navigator.canShare || navigator.canShare({ files: [file] })) {
+          await navigator.share(payload);
+          return;
+        }
+        await navigator.share({ title: payload.title, text });
+        return;
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+      }
+    }
+    downloadBlob(blob, name);
+    toast("Comprovante baixado");
+  }
+
   function createPackage({ name, quantity, validityMonths } = {}) {
     const qty = Math.max(1, Math.min(24, Number(quantity) || DEFAULT_QTY));
     const months = Math.max(1, Math.min(24, Number(validityMonths) || DEFAULT_MONTHS));
@@ -383,6 +558,9 @@
       expiresAt: null,
       completedAt: null,
       notes: "",
+      receiptId: null,
+      paymentAmount: null,
+      paymentDate: null,
     };
     state.packages.push(pkg);
     saveState();
@@ -452,7 +630,12 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
   function exportCSV() {
-    const rows = [["Data", "Horário", "Pacote", "Banhos do pacote", "Validade do pacote", "Observações", "Tem foto", "Origem"]];
+    const paymentCols = (pkg) => [
+      pkg && pkg.receiptId ? "Sim" : "Não",
+      pkg && pkg.paymentAmount != null ? fmtMoneyPlain(pkg.paymentAmount) : "",
+      pkg && pkg.paymentDate && parseYmd(pkg.paymentDate) ? fmtDate(parseYmd(pkg.paymentDate)) : "",
+    ];
+    const rows = [["Data", "Horário", "Pacote", "Banhos do pacote", "Validade do pacote", "Observações", "Tem foto", "Origem", "Comprovante", "Valor pago", "Data do pagamento"]];
     const baths = state.baths.slice().sort((a, b) => a.at.localeCompare(b.at));
     for (const b of baths) {
       const pkg = packageById(b.packageId);
@@ -465,6 +648,20 @@
         b.note || "",
         b.photoId ? "Sim" : "Não",
         origemLabel(b.origem),
+        ...paymentCols(pkg),
+      ]);
+    }
+    rows.push([]);
+    rows.push(["PACOTES"]);
+    rows.push(["Pacote", "Banhos do pacote", "Usados", "Validade do pacote", "Comprovante", "Valor pago", "Data do pagamento"]);
+    const pkgs = state.packages.slice().sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    for (const pkg of pkgs) {
+      rows.push([
+        pkg.name,
+        String(pkg.quantity),
+        String(usedCount(pkg)),
+        pkg.expiresAt ? fmtDate(new Date(pkg.expiresAt)) : "",
+        ...paymentCols(pkg),
       ]);
     }
     const body = rows.map((r) => r.map(csvCell).join(";")).join("\r\n");
@@ -480,7 +677,7 @@
     }
     const payload = {
       app: "jon-snow-banhos",
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       state: { packages: state.packages, baths: state.baths },
       photos,
@@ -506,7 +703,7 @@
         await putPhoto(id, blob);
       } catch { /* skip broken photo */ }
     }
-    state = { packages: pkgs, baths };
+    state = migrateState({ packages: pkgs, baths });
     recomputeAll();
     saveState();
   }
@@ -560,6 +757,7 @@
     if (parts[0] === "historico") return { name: "historico" };
     if (parts[0] === "pacotes") return { name: "pacotes" };
     if (parts[0] === "pacote" && parts[1] === "novo") return { name: "pacote-novo" };
+    if (parts[0] === "pacote" && parts[1]) return { name: "pacote", id: parts[1] };
     if (parts[0] === "mais") return { name: "mais" };
     if (parts[0] === "qr") return { name: "qr" };
     if (parts[0] === "nfc") return { name: "nfc" };
@@ -630,6 +828,25 @@
     }
     return "";
   }
+  function receiptRowHTML(pkg) {
+    const thumb = pkg.receiptId
+      ? `<img class="receipt-thumb" alt="Comprovante de pagamento" data-photo="${esc(pkg.receiptId)}" data-action="view-receipt" data-id="${esc(pkg.id)}" />`
+      : `<div class="receipt-thumb placeholder" aria-hidden="true">${ICO.receipt}</div>`;
+    const title = pkg.receiptId ? "Comprovante anexado" : "Adicionar comprovante";
+    const meta = [
+      pkg.paymentAmount != null ? fmtMoney(pkg.paymentAmount) : "",
+      pkg.paymentDate && parseYmd(pkg.paymentDate) ? fmtDate(parseYmd(pkg.paymentDate)) : "",
+    ].filter(Boolean).join(" · ");
+    const sub = meta || (pkg.receiptId ? "Toque para ver ou trocar" : "Valor, data e imagem do pagamento");
+    return `<a class="receipt-row" href="#/pacote/${esc(pkg.id)}">
+      ${thumb}
+      <div class="item-body">
+        <p class="item-title">${title}</p>
+        <p class="item-sub">${esc(sub)}</p>
+      </div>
+      ${ICO.chev}
+    </a>`;
+  }
   function bathItemHTML(b) {
     const pkg = packageById(b.packageId);
     const note = b.note ? ` · ${esc(b.note)}` : "";
@@ -676,6 +893,7 @@
         </div>
         ${segmentsHTML(used, pkg.quantity)}
         ${packageAlerts(pkg)}
+        ${receiptRowHTML(pkg)}
       </section>`;
     }
     const list = recent.length
@@ -730,6 +948,7 @@
         <p class="pkg-meta">${used} de ${pkg.quantity} banhos · ${esc(validade)}</p>
         ${segmentsHTML(used, pkg.quantity)}
         ${packageAlerts(pkg)}
+        ${receiptRowHTML(pkg)}
       </section>`;
     }).join("") || `<div class="empty"><p>Nenhum pacote ainda.</p></div>`;
     return `<div class="page">
@@ -759,6 +978,68 @@
           <p class="help">O prazo só começa a contar no primeiro banho do pacote.</p>
           <button class="btn btn-primary" type="submit">Criar pacote</button>
         </form>
+      </div>
+      ${navHTML("pacotes")}
+    </div>`;
+  }
+
+  function renderPacote(id) {
+    const pkg = packageById(id);
+    if (!pkg) {
+      return `<div class="page">${topbar("Pacote", "#/pacotes")}<div class="content flat"><div class="empty"><p>Pacote não encontrado.</p></div></div>${navHTML("pacotes")}</div>`;
+    }
+    const used = usedCount(pkg);
+    const validade = pkg.expiresAt
+      ? `Válido até ${fmtDate(new Date(pkg.expiresAt))}`
+      : "A validade começa no primeiro banho";
+    const photo = pkg.receiptId
+      ? `<button type="button" class="receipt-hero-btn" data-action="view-receipt" data-id="${esc(pkg.id)}">
+           <img class="photo-hero receipt-hero" alt="Comprovante de pagamento" data-photo="${esc(pkg.receiptId)}" />
+         </button>`
+      : `<div class="photo-hero placeholder">${ICO.receipt}<span>Nenhum comprovante ainda</span></div>`;
+    return `<div class="page">
+      ${topbar(pkg.name, "#/pacotes")}
+      <div class="content flat stack">
+        <section class="card">
+          <div class="pkg-head">
+            <h3 class="pkg-name">${esc(pkg.name)}</h3>
+            <span class="badge ${packageStatus(pkg)}">${STATUS_LABEL[packageStatus(pkg)]}</span>
+          </div>
+          <p class="pkg-meta">${used} de ${pkg.quantity} banhos · ${esc(validade)}</p>
+          ${segmentsHTML(used, pkg.quantity)}
+          ${packageAlerts(pkg)}
+        </section>
+        <section class="card">
+          <h2>Pagamento</h2>
+          <form data-form="pagamento" data-id="${esc(pkg.id)}">
+            <label class="field"><span>Valor pago (opcional)</span>
+              <input type="text" name="paymentAmount" inputmode="decimal" placeholder="0,00" value="${esc(moneyInputValue(pkg.paymentAmount))}" />
+            </label>
+            <label class="field"><span>Data do pagamento (opcional)</span>
+              <input type="date" name="paymentDate" value="${esc(pkg.paymentDate || "")}" />
+            </label>
+            <button class="btn btn-ghost" type="submit">Salvar valor e data</button>
+          </form>
+        </section>
+        <section class="card">
+          <h2>Comprovante</h2>
+          <p class="help">PNG ou JPEG. A imagem fica só neste aparelho, com qualidade alta o bastante para ler os dados.</p>
+          ${photo}
+          <div class="stack" style="margin-top:0.85rem">
+            <div class="btn-row">
+              <button class="btn btn-primary" data-action="add-receipt" data-id="${esc(pkg.id)}">${pkg.receiptId ? "Trocar comprovante" : "Adicionar comprovante"}</button>
+              ${pkg.receiptId ? `<button class="btn btn-ghost" data-action="receipt-camera" data-id="${esc(pkg.id)}">Tirar foto</button>` : `<button class="btn btn-ghost" data-action="receipt-camera" data-id="${esc(pkg.id)}">Tirar foto</button>`}
+            </div>
+            ${pkg.receiptId ? `<div class="btn-row">
+              <button class="btn btn-ghost" data-action="view-receipt" data-id="${esc(pkg.id)}">Ver em tamanho real</button>
+              <button class="btn btn-ghost" data-action="download-receipt" data-id="${esc(pkg.id)}">Baixar</button>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-ghost" data-action="share-receipt" data-id="${esc(pkg.id)}">Compartilhar</button>
+              <button class="btn btn-danger" data-action="delete-receipt" data-id="${esc(pkg.id)}">Remover comprovante</button>
+            </div>` : ""}
+          </div>
+        </section>
       </div>
       ${navHTML("pacotes")}
     </div>`;
@@ -935,6 +1216,8 @@
             <li><strong>Atalho / link</strong> — um atalho na Tela de Início, ou o botão Registrar aqui no app.</li>
           </ol>
           <p>Nos três jeitos aparece a mesma tela de confirmação, para não registrar duas vezes sem querer.</p>
+          <h3>Comprovante de pagamento</h3>
+          <p>Em cada pacote você pode guardar o valor, a data e uma imagem (PNG ou JPEG) do comprovante. Toque no pacote para anexar, ver em tamanho real, baixar ou compartilhar.</p>
           <h3>Fotos e dados</h3>
           <p>Depois de confirmar, você pode anexar uma foto do Jon Snow. Tudo fica só neste aparelho e neste navegador — nada vai para a nuvem.</p>
           <p>No iPhone, o Safari e o ícone da Tela de Início podem ter dados separados. Abra sempre do mesmo lugar e exporte um backup JSON de vez em quando.</p>
@@ -1040,8 +1323,44 @@
     </div>`;
   }
 
+  function receiptViewerHTML(packageId) {
+    const pkg = packageById(packageId);
+    if (!pkg || !pkg.receiptId) return "";
+    const bits = [];
+    if (pkg.paymentAmount != null) bits.push(fmtMoney(pkg.paymentAmount));
+    if (pkg.paymentDate && parseYmd(pkg.paymentDate)) bits.push(fmtDate(parseYmd(pkg.paymentDate)));
+    const meta = bits.length ? `<p class="lead">${esc(bits.join(" · "))}</p>` : "";
+    return `<div class="overlay center" data-overlay="receipt" role="dialog" aria-modal="true" aria-labelledby="receipt-title">
+      <div class="sheet lightbox-sheet">
+        <h2 id="receipt-title">Comprovante</h2>
+        ${meta}
+        <img class="receipt-full" alt="Comprovante de pagamento de ${esc(pkg.name)}" data-photo="${esc(pkg.receiptId)}" />
+        <div class="btn-row" style="margin-top:0.9rem">
+          <button class="btn btn-primary" data-action="download-receipt" data-id="${esc(pkg.id)}">Baixar</button>
+          <button class="btn btn-ghost" data-action="share-receipt" data-id="${esc(pkg.id)}">Compartilhar</button>
+        </div>
+        <button class="btn btn-ghost" data-action="close-overlay" style="margin-top:0.55rem">Fechar</button>
+      </div>
+    </div>`;
+  }
+  function deleteReceiptSheetHTML(packageId) {
+    const pkg = packageById(packageId);
+    if (!pkg) return "";
+    return `<div class="overlay center" data-overlay="delete-receipt" role="dialog" aria-modal="true">
+      <div class="sheet">
+        <h2>Remover comprovante?</h2>
+        <p class="lead">A imagem do comprovante de ${esc(pkg.name)} será apagada. O valor e a data de pagamento, se houver, são mantidos.</p>
+        <div class="stack">
+          <button class="btn btn-danger" data-action="confirm-delete-receipt" data-id="${esc(pkg.id)}">Remover</button>
+          <button class="btn btn-ghost" data-action="close-overlay">Cancelar</button>
+        </div>
+      </div>
+    </div>`;
+  }
+
   function photoInputsHTML() {
     return `<input class="hidden-file" id="photo-input" type="file" accept="image/*" />
+            <input class="hidden-file" id="receipt-input" type="file" accept="image/png,image/jpeg,.png,.jpg,.jpeg,image/*" />
             <input class="hidden-file" id="import-input" type="file" accept="application/json,.json" />`;
   }
 
@@ -1086,6 +1405,7 @@
     if (r.name === "historico") body = renderHistorico();
     else if (r.name === "pacotes") body = renderPacotes();
     else if (r.name === "pacote-novo") body = renderPacoteNovo();
+    else if (r.name === "pacote") body = renderPacote(r.id);
     else if (r.name === "mais") body = renderMais();
     else if (r.name === "qr") body = renderQR();
     else if (r.name === "nfc") body = renderNFC();
@@ -1233,6 +1553,35 @@
     if (action === "copy-link") { copyText(registerUrl("link")); return; }
     if (action === "print-qr") { window.print(); return; }
     if (action === "write-nfc") { writeNfcTag(); return; }
+    if (action === "view-receipt") {
+      e.preventDefault();
+      e.stopPropagation();
+      setOverlay(receiptViewerHTML(t.dataset.id));
+      const hold = document.getElementById("overlay-root");
+      if (hold) {
+        hold.innerHTML = overlayHTML;
+        hydratePhotos(hold);
+      }
+      return;
+    }
+    if (action === "add-receipt") { pickReceipt(t.dataset.id, false); return; }
+    if (action === "receipt-camera") { pickReceipt(t.dataset.id, true); return; }
+    if (action === "download-receipt") { downloadReceipt(t.dataset.id); return; }
+    if (action === "share-receipt") { shareReceipt(t.dataset.id); return; }
+    if (action === "delete-receipt") {
+      setOverlay(deleteReceiptSheetHTML(t.dataset.id));
+      const hold = document.getElementById("overlay-root");
+      if (hold) hold.innerHTML = overlayHTML;
+      return;
+    }
+    if (action === "confirm-delete-receipt") {
+      removeReceiptFromPackage(t.dataset.id).then(() => {
+        setOverlay("");
+        render();
+        toast("Comprovante removido");
+      });
+      return;
+    }
   }
 
   function onSubmit(e) {
@@ -1272,6 +1621,51 @@
       });
       toast("Alterações salvas");
       go(`#/banho/${form.dataset.id}`);
+      return;
+    }
+    if (kind === "pagamento") {
+      const raw = String(fd.get("paymentAmount") || "").trim();
+      let amount = null;
+      if (raw) {
+        amount = parseMoney(raw);
+        if (amount == null) { toast("Valor inválido"); return; }
+      }
+      const date = String(fd.get("paymentDate") || "").trim();
+      updatePackagePayment(form.dataset.id, {
+        paymentAmount: amount,
+        paymentDate: date || null,
+      });
+      toast("Pagamento salvo");
+      render();
+    }
+  }
+
+  let receiptTargetId = null;
+  let receiptUseCapture = false;
+  function pickReceipt(packageId, useCapture) {
+    receiptTargetId = packageId;
+    receiptUseCapture = !!useCapture;
+    const input = document.getElementById("receipt-input");
+    if (!input) return;
+    if (useCapture) input.setAttribute("capture", "environment");
+    else input.removeAttribute("capture");
+    input.value = "";
+    input.click();
+  }
+  async function onReceiptChange(e) {
+    const file = e.target.files && e.target.files[0];
+    const id = receiptTargetId;
+    if (!file || !id) return;
+    try {
+      await attachReceiptToPackage(id, file);
+      toast("Comprovante anexado");
+      if (route().name !== "pacote" || route().id !== id) go(`#/pacote/${id}`);
+      else render();
+    } catch (err) {
+      toast((err && err.message) || "Não foi possível salvar o comprovante");
+    } finally {
+      e.target.value = "";
+      receiptTargetId = null;
     }
   }
 
@@ -1312,7 +1706,7 @@
   function boot() {
     const loaded = loadState();
     if (loaded) {
-      state = loaded;
+      state = migrateState(loaded);
       recomputeAll();
       saveState();
     } else {
@@ -1323,6 +1717,7 @@
     app.addEventListener("submit", onSubmit);
     app.addEventListener("change", (e) => {
       if (e.target && e.target.id === "photo-input") onPhotoChange(e);
+      if (e.target && e.target.id === "receipt-input") onReceiptChange(e);
       if (e.target && e.target.id === "import-input") onImportChange(e);
     });
     window.addEventListener("hashchange", () => render());

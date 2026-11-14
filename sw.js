@@ -1,5 +1,5 @@
 /* Service worker do app Jon Snow — Banhos */
-const CACHE = "jonsnow-banhos-v1";
+const CACHE = "jonsnow-banhos-v2";
 const ASSETS = [
   "./",
   "./index.html",
